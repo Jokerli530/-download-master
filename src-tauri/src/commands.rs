@@ -1,0 +1,139 @@
+use crate::downloader::{DownloadManager, ProgressUpdate};
+use crate::task::{DownloadTask, TaskStatus};
+use parking_lot::Mutex;
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager, State};
+
+/// App state holding the download manager
+pub struct AppState {
+    pub manager: Arc<Mutex<DownloadManager>>,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        Self {
+            manager: Arc::new(Mutex::new(DownloadManager::new())),
+        }
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Add a new download task
+#[tauri::command]
+pub async fn add_task(
+    url: String,
+    filename: Option<String>,
+    connections: Option<u8>,
+    save_path: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<String, String> {
+    // Extract filename from URL if not provided
+    let fname = filename.unwrap_or_else(|| {
+        url.split('/')
+            .last()
+            .unwrap_or("download")
+            .split('?')
+            .next()
+            .unwrap_or("download")
+            .to_string()
+    });
+
+    let connections = connections.unwrap_or(3).max(1).min(8);
+
+    let task = DownloadTask::new(url, fname, save_path, connections);
+
+    // Clone task_id for the response
+    let task_id = task.id.clone();
+
+    // Set up progress event emitter
+    {
+        let manager = state.manager.lock();
+        let app_handle = app.clone();
+        // Note: We need to handle progress updates via events
+    }
+
+    // Start download
+    {
+        let manager = state.manager.lock();
+        manager.add_task(task).await?;
+    }
+
+    Ok(task_id)
+}
+
+/// Pause a download task
+#[tauri::command]
+pub fn pause_task(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let manager = state.manager.lock();
+    manager.pause_task(&id)
+}
+
+/// Resume a paused download task
+#[tauri::command]
+pub fn resume_task(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let manager = state.manager.lock();
+    manager.resume_task(&id)
+}
+
+/// Cancel a download task
+#[tauri::command]
+pub fn cancel_task(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let manager = state.manager.lock();
+    manager.cancel_task(&id)
+}
+
+/// Get all download tasks
+#[tauri::command]
+pub fn get_tasks(state: State<'_, AppState>) -> Vec<DownloadTask> {
+    let manager = state.manager.lock();
+    manager.get_tasks()
+}
+
+/// Get a specific task
+#[tauri::command]
+pub fn get_task(id: String, state: State<'_, AppState>) -> Option<DownloadTask> {
+    let manager = state.manager.lock();
+    manager.get_task(&id)
+}
+
+/// Set speed limit for a task (bytes per second, 0 = no limit)
+#[tauri::command]
+pub fn set_speed_limit(id: String, bytes_per_second: u64, state: State<'_, AppState>) -> Result<(), String> {
+    let manager = state.manager.lock();
+    if let Some(mut task) = manager.get_task(&id) {
+        task.speed_limit = if bytes_per_second == 0 { None } else { Some(bytes_per_second) };
+        Ok(())
+    } else {
+        Err("Task not found".to_string())
+    }
+}
+
+/// Clear all completed tasks
+#[tauri::command]
+pub fn clear_completed(state: State<'_, AppState>) -> Result<(), String> {
+    // For now, this is a no-op since we're using in-memory storage
+    // In a real app, you'd persist tasks to disk and filter here
+    Ok(())
+}
+
+/// Open file save dialog
+#[tauri::command]
+pub async fn select_save_path(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let file_path = app
+        .dialog()
+        .file()
+        .add_filter("All Files", &["*"])
+        .blocking_pick_file();
+
+    file_path
+        .map(|p| p.to_string())
+        .ok_or_else(|| "No file selected".to_string())
+}
