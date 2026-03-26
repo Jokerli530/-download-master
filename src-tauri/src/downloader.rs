@@ -1,12 +1,11 @@
 use crate::task::{DownloadState, DownloadTask, TaskStatus};
-use parking_lot::Mutex;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 
 /// Progress update sent to frontend
 #[derive(Debug, Clone, serde::Serialize)]
@@ -52,7 +51,7 @@ impl RateLimiter {
 
 /// Download manager that handles concurrent downloads
 pub struct DownloadManager {
-    tasks: Arc<Mutex<HashMap<String, Arc<Mutex<DownloadState>>>>>,
+    tasks: Arc<RwLock<HashMap<String, Arc<RwLock<DownloadState>>>>>,
     max_concurrent: usize,
     progress_sender: broadcast::Sender<ProgressUpdate>,
 }
@@ -62,7 +61,7 @@ impl DownloadManager {
         let (progress_sender, _) = broadcast::channel(100);
 
         Self {
-            tasks: Arc::new(Mutex::new(HashMap::new())),
+            tasks: Arc::new(RwLock::new(HashMap::new())),
             max_concurrent: 3,
             progress_sender,
         }
@@ -80,11 +79,11 @@ impl DownloadManager {
         let task_id = task.id.clone();
 
         // Create download state
-        let state = Arc::new(Mutex::new(DownloadState::new(task.clone())));
+        let state = Arc::new(RwLock::new(DownloadState::new(task.clone())));
 
         // Store in tasks map
         {
-            let mut tasks = self.tasks.lock();
+            let mut tasks = self.tasks.write().await;
             tasks.insert(task_id.clone(), state.clone());
         }
 
@@ -97,13 +96,13 @@ impl DownloadManager {
         tokio::spawn(async move {
             // Perform download
             if let Err(e) = download_file(&client, state.clone(), &task_id, progress_sender).await {
-                let mut state = state.lock();
+                let mut state = state.write().await;
                 state.task.status = TaskStatus::Failed;
                 state.task.error_message = Some(e.to_string());
             }
 
             // Remove from active tasks when done
-            let mut tasks = tasks.lock();
+            let mut tasks = tasks.write().await;
             tasks.remove(&task_id_for_remove);
         });
 
@@ -111,10 +110,10 @@ impl DownloadManager {
     }
 
     /// Pause a download task
-    pub fn pause_task(&self, id: &str) -> Result<(), String> {
-        let tasks = self.tasks.lock();
+    pub async fn pause_task(&self, id: &str) -> Result<(), String> {
+        let tasks = self.tasks.read().await;
         if let Some(state) = tasks.get(id) {
-            let state = state.lock();
+            let state = state.write().await;
             if state.task.status == TaskStatus::Downloading {
                 state.request_abort();
                 state.task.status = TaskStatus::Paused;
@@ -125,10 +124,10 @@ impl DownloadManager {
     }
 
     /// Resume a paused download task
-    pub fn resume_task(&self, id: &str) -> Result<(), String> {
-        let tasks = self.tasks.lock();
+    pub async fn resume_task(&self, id: &str) -> Result<(), String> {
+        let tasks = self.tasks.read().await;
         if let Some(state) = tasks.get(id) {
-            let mut state = state.lock();
+            let mut state = state.write().await;
             if state.task.status == TaskStatus::Paused {
                 state.task.status = TaskStatus::Downloading;
                 state.reset_abort();
@@ -139,10 +138,10 @@ impl DownloadManager {
     }
 
     /// Cancel a download task
-    pub fn cancel_task(&self, id: &str) -> Result<(), String> {
-        let tasks = self.tasks.lock();
+    pub async fn cancel_task(&self, id: &str) -> Result<(), String> {
+        let tasks = self.tasks.read().await;
         if let Some(state) = tasks.get(id) {
-            let mut state = state.lock();
+            let mut state = state.write().await;
             state.request_abort();
             state.task.status = TaskStatus::Cancelled;
             return Ok(());
@@ -151,15 +150,20 @@ impl DownloadManager {
     }
 
     /// Get all tasks
-    pub fn get_tasks(&self) -> Vec<DownloadTask> {
-        let tasks = self.tasks.lock();
-        tasks.values().map(|s| s.lock().task.clone()).collect()
+    pub async fn get_tasks(&self) -> Vec<DownloadTask> {
+        let tasks = self.tasks.read().await;
+        let mut result = Vec::new();
+        for s in tasks.values() {
+            let state = s.read().await;
+            result.push(state.task.clone());
+        }
+        result
     }
 
     /// Get a specific task
-    pub fn get_task(&self, id: &str) -> Option<DownloadTask> {
-        let tasks = self.tasks.lock();
-        tasks.get(id).map(|s| s.lock().task.clone())
+    pub async fn get_task(&self, id: &str) -> Option<DownloadTask> {
+        let tasks = self.tasks.read().await;
+        tasks.get(id).map(|s| s.try_read().unwrap().task.clone())
     }
 }
 
@@ -172,12 +176,12 @@ impl Default for DownloadManager {
 /// Download a file with progress reporting
 async fn download_file(
     client: &Client,
-    state: Arc<Mutex<DownloadState>>,
+    state: Arc<RwLock<DownloadState>>,
     task_id: &str,
     progress_sender: broadcast::Sender<ProgressUpdate>,
 ) -> Result<(), String> {
     let (url, filename, save_path, connections, speed_limit) = {
-        let state = state.lock();
+        let state = state.read().await;
         (
             state.task.url.clone(),
             state.task.filename.clone(),
@@ -213,7 +217,7 @@ async fn download_file(
 
     // Update task with total size
     {
-        let mut state = state.lock();
+        let mut state = state.write().await;
         state.task.total_size = total_size;
     }
 
@@ -223,7 +227,7 @@ async fn download_file(
 
     // Get current downloaded size for resume
     let downloaded = {
-        let state = state.lock();
+        let state = state.read().await;
         state.task.downloaded
     };
 
@@ -269,7 +273,7 @@ async fn download_file(
 /// Download using single connection
 async fn download_single(
     client: &Client,
-    state: Arc<Mutex<DownloadState>>,
+    state: Arc<RwLock<DownloadState>>,
     task_id: &str,
     url: &str,
     file: &mut File,
@@ -286,7 +290,7 @@ async fn download_single(
         .map_err(|e| format!("GET request failed: {}", e))?;
 
     let downloaded = {
-        let state = state.lock();
+        let state = state.read().await;
         state.task.downloaded
     };
 
@@ -305,9 +309,11 @@ async fn download_single(
     while let Some(chunk) = response.chunk().await.map_err(|e| format!("Chunk read error: {}", e))? {
         // Check abort flag
         {
-            let state = state.lock();
+            let state = state.read().await;
             if state.should_abort() {
                 // Save progress for resume
+                drop(state);
+                let state = state.write().await;
                 save_progress(&state.task, bytes_downloaded);
                 return Err("Download aborted".to_string());
             }
@@ -336,7 +342,7 @@ async fn download_single(
         };
 
         {
-            let mut state = state.lock();
+            let mut state = state.write().await;
             state.task.downloaded = bytes_downloaded;
             state.speed = speed;
         }
@@ -344,7 +350,6 @@ async fn download_single(
         // Send progress update every 100ms
         if last_update.elapsed().as_millis() > 100 {
             last_update = now;
-            let state = state.lock();
             let _ = progress_sender.send(ProgressUpdate {
                 id: task_id.to_string(),
                 downloaded: bytes_downloaded,
@@ -362,7 +367,7 @@ async fn download_single(
 
     // Mark as completed
     {
-        let mut state = state.lock();
+        let mut state = state.write().await;
         state.task.status = TaskStatus::Completed;
         state.task.downloaded = bytes_downloaded;
     }
@@ -373,7 +378,7 @@ async fn download_single(
 /// Download using multiple connections (multipart)
 async fn download_multipart(
     client: &Client,
-    state: Arc<Mutex<DownloadState>>,
+    state: Arc<RwLock<DownloadState>>,
     task_id: &str,
     url: &str,
     _file: &mut File,
@@ -392,7 +397,7 @@ async fn download_multipart(
         .map_err(|e| format!("GET request failed: {}", e))?;
 
     let downloaded = {
-        let state = state.lock();
+        let state = state.read().await;
         state.task.downloaded
     };
 
@@ -401,7 +406,7 @@ async fn download_multipart(
         let request = client
             .request(reqwest::Method::GET, url)
             .header("Range", format!("bytes={}-", downloaded));
-        response = request.send().await.map_err(|e| format!("Range request failed: {}", e))?;
+        response = request.send().await.map_err(|e,| format!("Range request failed: {}", e))?;
     }
 
     let mut bytes_downloaded = downloaded;
@@ -413,8 +418,10 @@ async fn download_multipart(
     while let Some(chunk) = response.chunk().await.map_err(|e| format!("Chunk read error: {}", e))? {
         // Check abort flag
         {
-            let state = state.lock();
+            let state = state.read().await;
             if state.should_abort() {
+                drop(state);
+                let state = state.write().await;
                 save_progress(&state.task, bytes_downloaded);
                 return Err("Download aborted".to_string());
             }
@@ -437,7 +444,7 @@ async fn download_multipart(
         };
 
         {
-            let mut state = state.lock();
+            let mut state = state.write().await;
             state.task.downloaded = bytes_downloaded;
             state.speed = speed;
         }
@@ -445,7 +452,6 @@ async fn download_multipart(
         let now = std::time::Instant::now();
         if last_update.elapsed().as_millis() > 100 {
             last_update = now;
-            let state = state.lock();
             let _ = progress_sender.send(ProgressUpdate {
                 id: task_id.to_string(),
                 downloaded: bytes_downloaded,
@@ -462,7 +468,7 @@ async fn download_multipart(
     }
 
     {
-        let mut state = state.lock();
+        let mut state = state.write().await;
         state.task.status = TaskStatus::Completed;
         state.task.downloaded = bytes_downloaded;
     }

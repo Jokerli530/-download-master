@@ -1,18 +1,18 @@
 use crate::downloader::{DownloadManager, ProgressUpdate};
 use crate::task::{DownloadTask, TaskStatus};
-use parking_lot::Mutex;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::RwLock;
 
 /// App state holding the download manager
 pub struct AppState {
-    pub manager: Arc<Mutex<DownloadManager>>,
+    pub manager: Arc<RwLock<DownloadManager>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
-            manager: Arc::new(Mutex::new(DownloadManager::new())),
+            manager: Arc::new(RwLock::new(DownloadManager::new())),
         }
     }
 }
@@ -51,16 +51,9 @@ pub async fn add_task(
     // Clone task_id for the response
     let task_id = task.id.clone();
 
-    // Set up progress event emitter
+    // Start download - use write().await to release lock before await
     {
-        let manager = state.manager.lock();
-        let app_handle = app.clone();
-        // Note: We need to handle progress updates via events
-    }
-
-    // Start download
-    {
-        let manager = state.manager.lock();
+        let manager = state.manager.write().await;
         manager.add_task(task).await?;
     }
 
@@ -69,44 +62,44 @@ pub async fn add_task(
 
 /// Pause a download task
 #[tauri::command]
-pub fn pause_task(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let manager = state.manager.lock();
-    manager.pause_task(&id)
+pub async fn pause_task(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let manager = state.manager.write().await;
+    manager.pause_task(&id).await
 }
 
 /// Resume a paused download task
 #[tauri::command]
-pub fn resume_task(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let manager = state.manager.lock();
-    manager.resume_task(&id)
+pub async fn resume_task(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let manager = state.manager.write().await;
+    manager.resume_task(&id).await
 }
 
 /// Cancel a download task
 #[tauri::command]
-pub fn cancel_task(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let manager = state.manager.lock();
-    manager.cancel_task(&id)
+pub async fn cancel_task(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let manager = state.manager.write().await;
+    manager.cancel_task(&id).await
 }
 
 /// Get all download tasks
 #[tauri::command]
-pub fn get_tasks(state: State<'_, AppState>) -> Vec<DownloadTask> {
-    let manager = state.manager.lock();
-    manager.get_tasks()
+pub async fn get_tasks(state: State<'_, AppState>) -> Vec<DownloadTask> {
+    let manager = state.manager.read().await;
+    manager.get_tasks().await
 }
 
 /// Get a specific task
 #[tauri::command]
-pub fn get_task(id: String, state: State<'_, AppState>) -> Option<DownloadTask> {
-    let manager = state.manager.lock();
-    manager.get_task(&id)
+pub async fn get_task(id: String, state: State<'_, AppState>) -> Option<DownloadTask> {
+    let manager = state.manager.read().await;
+    manager.get_task(&id).await
 }
 
 /// Set speed limit for a task (bytes per second, 0 = no limit)
 #[tauri::command]
-pub fn set_speed_limit(id: String, bytes_per_second: u64, state: State<'_, AppState>) -> Result<(), String> {
-    let manager = state.manager.lock();
-    if let Some(mut task) = manager.get_task(&id) {
+pub async fn set_speed_limit(id: String, bytes_per_second: u64, state: State<'_, AppState>) -> Result<(), String> {
+    let manager = state.manager.write().await;
+    if let Some(mut task) = manager.get_task(&id).await {
         task.speed_limit = if bytes_per_second == 0 { None } else { Some(bytes_per_second) };
         Ok(())
     } else {

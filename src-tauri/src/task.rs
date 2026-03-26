@@ -1,5 +1,5 @@
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Download task status
@@ -65,7 +65,7 @@ impl DownloadTask {
 /// Internal state for a running download
 pub struct DownloadState {
     pub task: DownloadTask,
-    pub abort_flag: Arc<Mutex<bool>>,
+    pub abort_flag: Arc<AtomicBool>,
     pub speed: u64, // bytes per second, updated in real-time
 }
 
@@ -73,21 +73,21 @@ impl DownloadState {
     pub fn new(task: DownloadTask) -> Self {
         Self {
             task,
-            abort_flag: Arc::new(Mutex::new(false)),
+            abort_flag: Arc::new(AtomicBool::new(false)),
             speed: 0,
         }
     }
 
     pub fn should_abort(&self) -> bool {
-        *self.abort_flag.lock()
+        self.abort_flag.load(Ordering::SeqCst)
     }
 
     pub fn request_abort(&self) {
-        *self.abort_flag.lock() = true;
+        self.abort_flag.store(true, Ordering::SeqCst);
     }
 
     pub fn reset_abort(&self) {
-        *self.abort_flag.lock() = false;
+        self.abort_flag.store(false, Ordering::SeqCst);
     }
 }
 
