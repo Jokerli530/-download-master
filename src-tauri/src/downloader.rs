@@ -6,7 +6,6 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::sync::broadcast;
 
 /// Progress update sent to frontend
@@ -53,7 +52,6 @@ impl RateLimiter {
 
 /// Download manager that handles concurrent downloads
 pub struct DownloadManager {
-    client: Client,
     tasks: Arc<Mutex<HashMap<String, Arc<Mutex<DownloadState>>>>>,
     max_concurrent: usize,
     progress_sender: broadcast::Sender<ProgressUpdate>,
@@ -61,19 +59,20 @@ pub struct DownloadManager {
 
 impl DownloadManager {
     pub fn new() -> Self {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .build()
-            .expect("Failed to create HTTP client");
-
         let (progress_sender, _) = broadcast::channel(100);
 
         Self {
-            client,
             tasks: Arc::new(Mutex::new(HashMap::new())),
             max_concurrent: 3,
             progress_sender,
         }
+    }
+
+    fn create_client() -> Client {
+        Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .expect("Failed to create HTTP client")
     }
 
     /// Start a new download task
@@ -90,7 +89,7 @@ impl DownloadManager {
         }
 
         // Start download in background
-        let client = self.client.clone();
+        let client = Self::create_client();
         let tasks = self.tasks.clone();
         let progress_sender = self.progress_sender.clone();
         let task_id_for_remove = task_id.clone();
