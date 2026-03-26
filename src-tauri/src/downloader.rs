@@ -7,6 +7,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 /// Progress update sent to frontend
 #[derive(Debug, Clone, serde::Serialize)]
@@ -55,7 +56,7 @@ pub struct DownloadManager {
     client: Client,
     tasks: Arc<Mutex<HashMap<String, Arc<Mutex<DownloadState>>>>>,
     max_concurrent: usize,
-    progress_sender: Option<mpsc::Sender<ProgressUpdate>>,
+    progress_sender: broadcast::Sender<ProgressUpdate>,
 }
 
 impl DownloadManager {
@@ -65,16 +66,14 @@ impl DownloadManager {
             .build()
             .expect("Failed to create HTTP client");
 
+        let (progress_sender, _) = broadcast::channel(100);
+
         Self {
             client,
             tasks: Arc::new(Mutex::new(HashMap::new())),
             max_concurrent: 3,
-            progress_sender: None,
+            progress_sender,
         }
-    }
-
-    pub fn set_progress_sender(&mut self, sender: mpsc::Sender<ProgressUpdate>) {
-        self.progress_sender = Some(sender);
     }
 
     /// Start a new download task
@@ -94,10 +93,11 @@ impl DownloadManager {
         let client = self.client.clone();
         let tasks = self.tasks.clone();
         let progress_sender = self.progress_sender.clone();
+        let task_id_for_remove = task_id.clone();
 
         tokio::spawn(async move {
             // Perform download
-            if let Err(e) = download_file(&client, state.clone(), &task_id, progress_sender.clone()).await {
+            if let Err(e) = download_file(&client, state.clone(), &task_id, progress_sender).await {
                 let mut state = state.lock();
                 state.task.status = TaskStatus::Failed;
                 state.task.error_message = Some(e.to_string());
@@ -105,7 +105,7 @@ impl DownloadManager {
 
             // Remove from active tasks when done
             let mut tasks = tasks.lock();
-            tasks.remove(&task_id);
+            tasks.remove(&task_id_for_remove);
         });
 
         Ok(task_id)
@@ -175,7 +175,7 @@ async fn download_file(
     client: &Client,
     state: Arc<Mutex<DownloadState>>,
     task_id: &str,
-    progress_sender: Option<mpsc::Sender<ProgressUpdate>>,
+    progress_sender: broadcast::Sender<ProgressUpdate>,
 ) -> Result<(), String> {
     let (url, filename, save_path, connections, speed_limit) = {
         let state = state.lock();
@@ -276,7 +276,7 @@ async fn download_single(
     file: &mut File,
     total_size: u64,
     speed_limit: Option<u64>,
-    progress_sender: Option<mpsc::Sender<ProgressUpdate>>,
+    progress_sender: broadcast::Sender<ProgressUpdate>,
 ) -> Result<(), String> {
     let mut rate_limiter = speed_limit.map(RateLimiter::new);
 
@@ -345,21 +345,19 @@ async fn download_single(
         // Send progress update every 100ms
         if last_update.elapsed().as_millis() > 100 {
             last_update = now;
-            if let Some(ref sender) = progress_sender {
-                let state = state.lock();
-                let _ = sender.send(ProgressUpdate {
-                    id: task_id.to_string(),
-                    downloaded: bytes_downloaded,
-                    total: total_size,
-                    speed,
-                    progress: if total_size > 0 {
-                        (bytes_downloaded as f64 / total_size as f64) * 100.0
-                    } else {
-                        0.0
-                    },
-                    status: "downloading".to_string(),
-                }).await;
-            }
+            let state = state.lock();
+            let _ = progress_sender.send(ProgressUpdate {
+                id: task_id.to_string(),
+                downloaded: bytes_downloaded,
+                total: total_size,
+                speed,
+                progress: if total_size > 0 {
+                    (bytes_downloaded as f64 / total_size as f64) * 100.0
+                } else {
+                    0.0
+                },
+                status: "downloading".to_string(),
+            });
         }
     }
 
@@ -383,7 +381,7 @@ async fn download_multipart(
     total_size: u64,
     connections: usize,
     speed_limit: Option<u64>,
-    progress_sender: Option<mpsc::Sender<ProgressUpdate>>,
+    progress_sender: broadcast::Sender<ProgressUpdate>,
 ) -> Result<(), String> {
     // For simplicity, use single connection for now
     // Multi-part download requires more complex file handling
@@ -448,21 +446,19 @@ async fn download_multipart(
         let now = std::time::Instant::now();
         if last_update.elapsed().as_millis() > 100 {
             last_update = now;
-            if let Some(ref sender) = progress_sender {
-                let state = state.lock();
-                let _ = sender.send(ProgressUpdate {
-                    id: task_id.to_string(),
-                    downloaded: bytes_downloaded,
-                    total: total_size,
-                    speed,
-                    progress: if total_size > 0 {
-                        (bytes_downloaded as f64 / total_size as f64) * 100.0
-                    } else {
-                        0.0
-                    },
-                    status: "downloading".to_string(),
-                }).await;
-            }
+            let state = state.lock();
+            let _ = progress_sender.send(ProgressUpdate {
+                id: task_id.to_string(),
+                downloaded: bytes_downloaded,
+                total: total_size,
+                speed,
+                progress: if total_size > 0 {
+                    (bytes_downloaded as f64 / total_size as f64) * 100.0
+                } else {
+                    0.0
+                },
+                status: "downloading".to_string(),
+            });
         }
     }
 
