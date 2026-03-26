@@ -307,16 +307,17 @@ async fn download_single(
     let mut last_update = std::time::Instant::now();
 
     while let Some(chunk) = response.chunk().await.map_err(|e| format!("Chunk read error: {}", e))? {
-        // Check abort flag
-        {
-            let state = state.read().await;
-            if state.should_abort() {
-                // Save progress for resume
-                drop(state);
-                let state = state.write().await;
-                save_progress(&state.task, bytes_downloaded);
-                return Err("Download aborted".to_string());
-            }
+        // Check abort flag - don't hold lock across await
+        let needs_abort = {
+            let guard = state.read().await;
+            guard.should_abort()
+        };
+
+        if needs_abort {
+            // Save progress for resume
+            let mut guard = state.write().await;
+            save_progress(&guard.task, bytes_downloaded);
+            return Err("Download aborted".to_string());
         }
 
         let chunk_len = chunk.len();
@@ -416,15 +417,16 @@ async fn download_multipart(
     let mut rate_limiter = speed_limit.map(RateLimiter::new);
 
     while let Some(chunk) = response.chunk().await.map_err(|e| format!("Chunk read error: {}", e))? {
-        // Check abort flag
-        {
-            let state = state.read().await;
-            if state.should_abort() {
-                drop(state);
-                let state = state.write().await;
-                save_progress(&state.task, bytes_downloaded);
-                return Err("Download aborted".to_string());
-            }
+        // Check abort flag - don't hold lock across await
+        let needs_abort = {
+            let guard = state.read().await;
+            guard.should_abort()
+        };
+
+        if needs_abort {
+            let mut guard = state.write().await;
+            save_progress(&guard.task, bytes_downloaded);
+            return Err("Download aborted".to_string());
         }
 
         let chunk_len = chunk.len();
