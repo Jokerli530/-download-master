@@ -129,13 +129,9 @@ pub fn clear_completed(state: State<'_, AppState>) -> Result<(), String> {
 pub async fn select_save_path(app: AppHandle) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    // Use file picker with directory mode if available, otherwise return downloads dir
-    if let Some(path) = app.dialog().blocking_pick_file() {
-        return Ok(path.to_string());
-    }
-
-    // Fallback to downloads directory
+    // For now, just return the downloads directory
+    // File/folder picker will be improved later
     dirs::download_dir()
         .map(|p| p.to_string_lossy().to_string())
-        .ok_or_else(|| "No folder selected".to_string())
+        .ok_or_else(|| "Could not find downloads directory".to_string())
 }
