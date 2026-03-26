@@ -83,16 +83,16 @@ pub async fn cancel_task(id: String, state: State<'_, AppState>) -> Result<(), S
 
 /// Get all download tasks
 #[tauri::command]
-pub async fn get_tasks(state: State<'_, AppState>) -> Vec<DownloadTask> {
+pub async fn get_tasks(state: State<'_, AppState>) -> Result<Vec<DownloadTask>, String> {
     let manager = state.manager.read().await;
-    manager.get_tasks().await
+    Ok(manager.get_tasks().await)
 }
 
 /// Get a specific task
 #[tauri::command]
-pub async fn get_task(id: String, state: State<'_, AppState>) -> Option<DownloadTask> {
+pub async fn get_task(id: String, state: State<'_, AppState>) -> Result<Option<DownloadTask>, String> {
     let manager = state.manager.read().await;
-    manager.get_task(&id).await
+    Ok(manager.get_task(&id).await)
 }
 
 /// Set speed limit for a task (bytes per second, 0 = no limit)

@@ -77,6 +77,7 @@ impl DownloadManager {
     /// Start a new download task
     pub async fn add_task(&self, mut task: DownloadTask) -> Result<String, String> {
         let task_id = task.id.clone();
+        let task_id_for_return = task_id.clone();
 
         // Create download state
         let state = Arc::new(RwLock::new(DownloadState::new(task.clone())));
@@ -95,10 +96,10 @@ impl DownloadManager {
 
         tokio::spawn(async move {
             // Perform download
-            if let Err(e) = download_file(&client, state.clone(), &task_id, progress_sender).await {
-                let mut state = state.write().await;
-                state.task.status = TaskStatus::Failed;
-                state.task.error_message = Some(e.to_string());
+            if let Err(e) = download_file(&client, state.clone(), &task_id_for_remove, progress_sender).await {
+                let mut state_guard = state.write().await;
+                state_guard.task.status = TaskStatus::Failed;
+                state_guard.task.error_message = Some(e.to_string());
             }
 
             // Remove from active tasks when done
@@ -106,47 +107,65 @@ impl DownloadManager {
             tasks.remove(&task_id_for_remove);
         });
 
-        Ok(task_id)
+        Ok(task_id_for_return)
     }
 
     /// Pause a download task
     pub async fn pause_task(&self, id: &str) -> Result<(), String> {
-        let tasks = self.tasks.read().await;
-        if let Some(state) = tasks.get(id) {
-            let state = state.write().await;
+        // Get Arc out of the lock first, then release the read lock
+        let state_arc = {
+            let tasks = self.tasks.read().await;
+            tasks.get(id).cloned()
+        };
+
+        if let Some(state_arc) = state_arc {
+            let mut state = state_arc.write().await;
             if state.task.status == TaskStatus::Downloading {
                 state.request_abort();
                 state.task.status = TaskStatus::Paused;
                 return Ok(());
             }
+            Err("Task not in downloading state".to_string())
+        } else {
+            Err("Task not found".to_string())
         }
-        Err("Task not found or not in downloading state".to_string())
     }
 
     /// Resume a paused download task
     pub async fn resume_task(&self, id: &str) -> Result<(), String> {
-        let tasks = self.tasks.read().await;
-        if let Some(state) = tasks.get(id) {
-            let mut state = state.write().await;
+        let state_arc = {
+            let tasks = self.tasks.read().await;
+            tasks.get(id).cloned()
+        };
+
+        if let Some(state_arc) = state_arc {
+            let mut state = state_arc.write().await;
             if state.task.status == TaskStatus::Paused {
                 state.task.status = TaskStatus::Downloading;
                 state.reset_abort();
                 return Ok(());
             }
+            Err("Task not paused".to_string())
+        } else {
+            Err("Task not found".to_string())
         }
-        Err("Task not found or not paused".to_string())
     }
 
     /// Cancel a download task
     pub async fn cancel_task(&self, id: &str) -> Result<(), String> {
-        let tasks = self.tasks.read().await;
-        if let Some(state) = tasks.get(id) {
-            let mut state = state.write().await;
+        let state_arc = {
+            let tasks = self.tasks.read().await;
+            tasks.get(id).cloned()
+        };
+
+        if let Some(state_arc) = state_arc {
+            let mut state = state_arc.write().await;
             state.request_abort();
             state.task.status = TaskStatus::Cancelled;
-            return Ok(());
+            Ok(())
+        } else {
+            Err("Task not found".to_string())
         }
-        Err("Task not found".to_string())
     }
 
     /// Get all tasks
