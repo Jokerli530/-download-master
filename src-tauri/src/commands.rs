@@ -46,7 +46,16 @@ pub async fn add_task(
 
     let connections = connections.unwrap_or(3).max(1).min(8);
 
-    let task = DownloadTask::new(url, fname, save_path, connections);
+    // Use default downloads folder if save_path is empty
+    let final_save_path = if save_path.is_empty() {
+        dirs::download_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string())
+    } else {
+        save_path
+    };
+
+    let task = DownloadTask::new(url, fname, final_save_path, connections);
 
     // Clone task_id for the response
     let task_id = task.id.clone();
@@ -120,13 +129,11 @@ pub fn clear_completed(state: State<'_, AppState>) -> Result<(), String> {
 pub async fn select_save_path(app: AppHandle) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    let file_path = app
+    let folder_path = app
         .dialog()
-        .file()
-        .add_filter("All Files", &["*"])
-        .blocking_pick_file();
+        .blocking_pick_folder();
 
-    file_path
+    folder_path
         .map(|p| p.to_string())
-        .ok_or_else(|| "No file selected".to_string())
+        .ok_or_else(|| "No folder selected".to_string())
 }
